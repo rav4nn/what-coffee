@@ -40,28 +40,27 @@ const OPTION_SETS: Record<Exclude<OptionType, null>, Option[]> = {
 function detectOptionType(text: string): OptionType {
   if (!text.includes("?")) return null;
   const lower = text.toLowerCase();
+  // Check brew first — bot echoes user's experience answer so we must avoid false-positives
   if (
-    lower.includes("rabbit hole") ||
-    lower.includes("getting started") ||
-    lower.includes("casual everyday") ||
-    (lower.includes("experience") && (lower.includes("casual") || lower.includes("beginner") || lower.includes("enthusiast")))
-  ) return "experience";
-  if (
-    lower.includes("brew with") ||
-    lower.includes("equipment") ||
+    lower.includes("equipment do you brew") ||
+    lower.includes("what equipment") ||
     lower.includes("how do you brew") ||
-    lower.includes("how do you make") ||
-    lower.includes("what do you use to brew") ||
-    (lower.includes("brew") && (lower.includes("espresso") || lower.includes("pour over") || lower.includes("aeropress") || lower.includes("french press")))
+    lower.includes("what do you brew with")
   ) return "brew";
+  // Flavor — only the specific question phrase
   if (
+    lower.includes("what flavors do you enjoy") ||
+    lower.includes("what flavours do you enjoy") ||
     lower.includes("flavors do you enjoy") ||
     lower.includes("flavours do you enjoy") ||
-    lower.includes("what flavors") ||
-    lower.includes("what flavours") ||
-    (lower.includes("flavor") && lower.includes("?")) ||
-    (lower.includes("flavour") && lower.includes("?"))
+    lower.includes("what kind of flavors") ||
+    lower.includes("what kind of flavours")
   ) return "flavor";
+  // Experience — only the specific question phrasing the bot is instructed to use
+  if (
+    lower.includes("rabbit hole?") ||
+    (lower.includes("getting started") && lower.includes("rabbit hole"))
+  ) return "experience";
   return null;
 }
 
