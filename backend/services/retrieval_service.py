@@ -2,6 +2,7 @@ import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.coffee import Coffee, init_db
+from peewee import fn
 
 def search_coffees(
     roast_level: str = None,
@@ -16,6 +17,15 @@ def search_coffees(
     Returns a list of coffee dicts ready to inject into the LLM prompt.
     """
     init_db()
+
+    has_filters = any([
+        roast_level and roast_level != "unknown",
+        brew_method,
+        flavor_keywords,
+        process and process != "unknown",
+        max_price,
+    ])
+
     query = Coffee.select().where(Coffee.is_available == True)
 
     if roast_level and roast_level != "unknown":
@@ -37,12 +47,17 @@ def search_coffees(
                 Coffee.description.contains(keyword)
             )
 
-    results = list(query.limit(limit))
+    # Always randomise so results are diverse across roasters
+    results = list(query.order_by(fn.RANDOM()).limit(limit))
 
-    # if filters are too strict and return nothing, fall back to no filters
-    if not results:
-        query = Coffee.select().where(Coffee.is_available == True).limit(limit)
-        results = list(query)
+    # If filters were too strict and returned nothing, fall back to random sample
+    if not results and has_filters:
+        results = list(
+            Coffee.select()
+            .where(Coffee.is_available == True)
+            .order_by(fn.RANDOM())
+            .limit(limit)
+        )
 
     return [coffee_to_dict(c) for c in results]
 
