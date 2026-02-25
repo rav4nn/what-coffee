@@ -6,5 +6,4 @@ __pycache__/
 *.pyc
 
 # Data & Databases
-backend/coffees.db
 backend/*.json
