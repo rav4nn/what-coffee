@@ -31,3 +31,6 @@ httpx
 
 # Linting
 ruff
+
+# Library
+peewee

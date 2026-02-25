@@ -1,0 +1,10 @@
+# Secrets
+.env
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Data & Databases
+backend/coffees.db
+backend/*.json
