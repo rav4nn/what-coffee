@@ -24,9 +24,10 @@ app.add_middleware(
     allow_origins=["*"],  # tighten this when you deploy
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Session-Id"],
 )
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=3)
 
 # In-memory session store (fine for development)
 sessions: dict = {}
@@ -191,7 +192,11 @@ async def chat(request: ChatRequest):
             "content": full_response
         })
 
-    return StreamingResponse(stream_response(), media_type="text/plain")
+    return StreamingResponse(
+        stream_response(),
+        media_type="text/plain",
+        headers={"X-Session-Id": session_id},
+    )
 
 
 @app.delete("/chat/{session_id}")
