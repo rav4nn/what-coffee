@@ -173,6 +173,7 @@ export default function Home() {
   const formatMessage = (content: string) => {
     return content
       .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
       .replace(/\n/g, "<br/>");
   };
 
@@ -537,6 +538,9 @@ export default function Home() {
 
         .bubble strong { color: var(--latte); font-weight: 500; }
         .bubble.user strong { color: var(--espresso); }
+        .bubble a { color: var(--accent); text-decoration: underline; }
+        .bubble a:hover { color: var(--latte); }
+        .bubble.user a { color: var(--espresso); }
 
         /* Typing indicator */
         .bubble.typing {
