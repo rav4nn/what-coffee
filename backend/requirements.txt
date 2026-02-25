@@ -1,0 +1,33 @@
+# API Framework
+fastapi
+uvicorn[standard]
+
+# Database
+sqlalchemy[asyncio]
+asyncpg
+pgvector
+alembic
+
+# LLM
+anthropic
+
+# Web Scraping
+playwright
+scrapy
+
+# Task Queue
+celery
+redis
+
+# Environment Variables
+python-dotenv
+
+# Data Validation
+pydantic
+pydantic-settings
+
+# HTTP Client
+httpx
+
+# Linting
+ruff
