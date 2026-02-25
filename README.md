@@ -1,7 +1,7 @@
 # ☕ What Coffee
 
 An AI-powered coffee recommendation chatbot that learns your preferences 
-and recommends coffees via affiliate links.
+and recommends coffees in a personalized manner.
 
 ## Tech Stack
 - **Backend:** Python / FastAPI
