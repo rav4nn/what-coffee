@@ -2,35 +2,17 @@
 fastapi
 uvicorn[standard]
 
-# Database
-sqlalchemy[asyncio]
-asyncpg
-pgvector
-alembic
-
 # LLM
 anthropic
 
-# Web Scraping
-playwright
-scrapy
-
-# Task Queue
-celery
-redis
+# Database
+peewee
 
 # Environment Variables
 python-dotenv
 
 # Data Validation
 pydantic
-pydantic-settings
 
 # HTTP Client
 httpx
-
-# Linting
-ruff
-
-# Library
-peewee
