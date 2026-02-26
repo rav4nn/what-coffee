@@ -199,7 +199,7 @@ async def chat(request: ChatRequest):
         try:
             # ── First call ────────────────────────────────────────────────────
             for chunk in client.models.generate_content_stream(
-                model    = "gemini-2.0-flash",
+                model    = "gemini-2.5-flash-preview-05-20",
                 contents = sessions[session_id],
                 config   = _GEN_CONFIG,
             ):
@@ -261,7 +261,7 @@ async def chat(request: ChatRequest):
 
                 # ── Second call: stream the recommendation ────────────────────
                 for chunk in client.models.generate_content_stream(
-                    model    = "gemini-2.0-flash",
+                    model    = "gemini-2.5-flash-preview-05-20",
                     contents = sessions[session_id],
                     config   = _GEN_CONFIG,
                 ):
