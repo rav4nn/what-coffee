@@ -68,6 +68,9 @@ client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries
 # In-memory session store
 sessions: dict = {}
 
+MAX_TURNS      = 8   # hard cap per session — no API call beyond this
+HISTORY_WINDOW = 6   # messages sent as context (3 turn pairs)
+
 # ── Load static content at startup ───────────────────────────────────────────
 
 def _load_system_prompt() -> str:
@@ -110,6 +113,16 @@ async def chat(request: ChatRequest):
          turn=turn,
          message_length=len(request.message))
 
+    # Hard turn cap — return canned message without calling Claude
+    if turn > MAX_TURNS:
+        _log("INFO", "turn_limit_reached", session_id=session_id)
+        canned = "You've reached the end of this session! Refresh the page to start fresh and discover more coffees. ☕"
+        return StreamingResponse(
+            iter([canned]),
+            media_type = "text/plain",
+            headers    = {"X-Session-Id": session_id},
+        )
+
     sessions[session_id].append({
         "role":    "user",
         "content": request.message,
@@ -118,10 +131,12 @@ async def chat(request: ChatRequest):
     def stream_response():
         full_response = ""
         t0 = time.perf_counter()
+        # Sliding window — cap how much history is sent to Claude
+        context = sessions[session_id][-HISTORY_WINDOW:]
         try:
             with client.messages.stream(
-                model      = "claude-sonnet-4-6",
-                max_tokens = 1024,
+                model      = "claude-haiku-4-5-20251001",
+                max_tokens = 600,
                 system     = [
                     {
                         "type": "text",
@@ -137,7 +152,7 @@ async def chat(request: ChatRequest):
                         "cache_control": {"type": "ephemeral"},
                     },
                 ],
-                messages   = sessions[session_id],
+                messages   = context,
             ) as stream:
                 for text in stream.text_stream:
                     full_response += text
