@@ -12,7 +12,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 from services.retrieval_service import search_coffees
@@ -63,49 +64,49 @@ app.add_middleware(
     expose_headers=["X-Session-Id"],
 )
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# In-memory session store
-# Messages stored in Gemini format: {"role": "user"/"model", "parts": [{"text": ...}]}
+# In-memory session store — list of types.Content objects per session
 sessions: dict = {}
 
 MAX_TURNS = 8  # hard cap per session — no API call beyond this
 
 # ── Tool definition ───────────────────────────────────────────────────────────
-# Gemini uses uppercase type names (STRING, OBJECT, ARRAY, NUMBER)
 
-SEARCH_TOOL = [{
-    "function_declarations": [{
-        "name": "search_coffees",
-        "description": (
-            "Search the coffee database for coffees that match the user's preferences. "
-            "Call this as soon as you have the user's brew method AND flavor preferences. "
-            "Do not keep asking questions — call the tool and present the results."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "brew_method": {
-                    "type": "STRING",
-                    "description": "Brewing equipment, e.g. Pour Over, Espresso, French Press, AeroPress, Moka Pot, South Indian Filter, Cold Brew",
+SEARCH_TOOL = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="search_coffees",
+            description=(
+                "Search the coffee database for coffees that match the user's preferences. "
+                "Call this as soon as you have the user's brew method AND flavor preferences. "
+                "Do not keep asking questions — call the tool and present the results."
+            ),
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "brew_method": types.Schema(
+                        type=types.Type.STRING,
+                        description="Brewing equipment, e.g. Pour Over, Espresso, French Press, AeroPress, Moka Pot, South Indian Filter, Cold Brew",
+                    ),
+                    "roast_level": types.Schema(
+                        type=types.Type.STRING,
+                        description="Preferred roast level: light, medium-light, medium, medium-dark, dark",
+                    ),
+                    "flavor_keywords": types.Schema(
+                        type=types.Type.ARRAY,
+                        items=types.Schema(type=types.Type.STRING),
+                        description="Flavor descriptors the user mentioned, e.g. fruity, citrus, chocolate, caramel, floral",
+                    ),
+                    "max_price": types.Schema(
+                        type=types.Type.NUMBER,
+                        description="Maximum budget in INR per 250g",
+                    ),
                 },
-                "roast_level": {
-                    "type": "STRING",
-                    "description": "Preferred roast level: light, medium-light, medium, medium-dark, dark",
-                },
-                "flavor_keywords": {
-                    "type": "ARRAY",
-                    "items": {"type": "STRING"},
-                    "description": "Flavor descriptors the user mentioned, e.g. fruity, citrus, chocolate, caramel, floral",
-                },
-                "max_price": {
-                    "type": "NUMBER",
-                    "description": "Maximum budget in INR per 250g",
-                },
-            },
-        },
-    }],
-}]
+            ),
+        )
+    ]
+)
 
 
 def _format_search_results(coffees: list[dict]) -> str:
@@ -130,10 +131,10 @@ def _load_system_prompt() -> str:
 
 SYSTEM_PROMPT = _load_system_prompt()
 
-# Gemini model — system_instruction is set once here
-model = genai.GenerativeModel(
-    model_name   = "gemini-2.0-flash",
-    system_instruction = SYSTEM_PROMPT,
+_GEN_CONFIG = types.GenerateContentConfig(
+    system_instruction=SYSTEM_PROMPT,
+    tools=[SEARCH_TOOL],
+    max_output_tokens=600,
 )
 
 _log("INFO", "startup", system_prompt_chars=len(SYSTEM_PROMPT))
@@ -146,14 +147,12 @@ class ChatRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _is_real_user_turn(msg: dict) -> bool:
+def _is_real_user_turn(content: types.Content) -> bool:
     """True for user text messages, False for function_response messages."""
-    parts = msg.get("parts", [])
     return (
-        msg.get("role") == "user" and
-        parts and
-        isinstance(parts[0], dict) and
-        "text" in parts[0]
+        content.role == "user" and
+        bool(content.parts) and
+        bool(content.parts[0].text)
     )
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -187,11 +186,9 @@ async def chat(request: ChatRequest):
             headers    = {"X-Session-Id": session_id},
         )
 
-    # Gemini message format: role + parts list
-    sessions[session_id].append({
-        "role":  "user",
-        "parts": [{"text": request.message}],
-    })
+    sessions[session_id].append(
+        types.Content(role="user", parts=[types.Part(text=request.message)])
+    )
 
     def stream_response():
         full_text      = ""
@@ -201,21 +198,18 @@ async def chat(request: ChatRequest):
 
         try:
             # ── First call ────────────────────────────────────────────────────
-            response = model.generate_content(
-                contents          = sessions[session_id],
-                tools             = SEARCH_TOOL,
-                generation_config = {"max_output_tokens": 600},
-                stream            = True,
-            )
-
-            for chunk in response:
+            for chunk in client.models.generate_content_stream(
+                model   = "gemini-2.0-flash",
+                contents = sessions[session_id],
+                config   = _GEN_CONFIG,
+            ):
                 if not chunk.candidates:
                     continue
                 for part in chunk.candidates[0].content.parts:
-                    if hasattr(part, "text") and part.text:
+                    if part.text:
                         full_text += part.text
                         yield part.text
-                    elif hasattr(part, "function_call") and part.function_call.name:
+                    elif part.function_call:
                         function_call = part.function_call
 
             # ── Tool call branch ──────────────────────────────────────────────
@@ -239,44 +233,51 @@ async def chat(request: ChatRequest):
                 tool_result = _format_search_results(results)
 
                 # Store model's function call + tool result in history
-                sessions[session_id].append({
-                    "role":  "model",
-                    "parts": [{"function_call": {"name": function_call.name, "args": fc_args}}],
-                })
-                sessions[session_id].append({
-                    "role":  "user",
-                    "parts": [{"function_response": {
-                        "name":     function_call.name,
-                        "response": {"result": tool_result},
-                    }}],
-                })
+                sessions[session_id].append(
+                    types.Content(
+                        role="model",
+                        parts=[types.Part(
+                            function_call=types.FunctionCall(
+                                name=function_call.name,
+                                args=fc_args,
+                            )
+                        )],
+                    )
+                )
+                sessions[session_id].append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(
+                            function_response=types.FunctionResponse(
+                                name=function_call.name,
+                                response={"result": tool_result},
+                            )
+                        )],
+                    )
+                )
 
                 # ── Second call: stream the recommendation ────────────────────
-                response2 = model.generate_content(
-                    contents          = sessions[session_id],
-                    tools             = SEARCH_TOOL,
-                    generation_config = {"max_output_tokens": 600},
-                    stream            = True,
-                )
-                for chunk in response2:
+                for chunk in client.models.generate_content_stream(
+                    model    = "gemini-2.0-flash",
+                    contents = sessions[session_id],
+                    config   = _GEN_CONFIG,
+                ):
                     if not chunk.candidates:
                         continue
                     for part in chunk.candidates[0].content.parts:
-                        if hasattr(part, "text") and part.text:
+                        if part.text:
                             rec_text += part.text
                             yield part.text
 
-                sessions[session_id].append({
-                    "role":  "model",
-                    "parts": [{"text": rec_text}],
-                })
+                sessions[session_id].append(
+                    types.Content(role="model", parts=[types.Part(text=rec_text)])
+                )
 
             else:
                 # Plain conversational response
-                sessions[session_id].append({
-                    "role":  "model",
-                    "parts": [{"text": full_text}],
-                })
+                sessions[session_id].append(
+                    types.Content(role="model", parts=[types.Part(text=full_text)])
+                )
 
             _log("INFO", "chat_response",
                  session_id=session_id,
