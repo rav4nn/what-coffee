@@ -291,7 +291,11 @@ async def chat(request: ChatRequest):
                  turn=turn,
                  duration_ms=round((time.perf_counter() - t0) * 1000),
                  error=str(exc))
-            raise
+            err = str(exc)
+            if "429" in err or "quota" in err.lower() or "ResourceExhausted" in type(exc).__name__:
+                yield "I'm getting a lot of requests right now — please try again in a minute!"
+            else:
+                yield "Something went wrong on my end. Please try again!"
 
     return StreamingResponse(
         stream_response(),
