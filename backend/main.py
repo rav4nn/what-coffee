@@ -99,8 +99,8 @@ SEARCH_TOOL = [
                         "description": "Flavor descriptors the user mentioned, comma-separated, e.g. fruity, citrus, chocolate, caramel, floral",
                     },
                     "max_price": {
-                        "type": "number",
-                        "description": "Maximum budget in INR per 250g",
+                        "type": "string",
+                        "description": "Maximum budget in INR per 250g, e.g. 500",
                     },
                 },
             },
@@ -237,11 +237,17 @@ async def chat(request: ChatRequest):
                 else:
                     flavor_keywords = [k.strip() for k in raw_flavors.split(",") if k.strip()]
 
+                raw_price = fc_args.get("max_price")
+                try:
+                    max_price = float(raw_price) if raw_price else None
+                except (ValueError, TypeError):
+                    max_price = None
+
                 results     = search_coffees(
                     brew_method     = fc_args.get("brew_method"),
                     roast_level     = fc_args.get("roast_level"),
                     flavor_keywords = flavor_keywords,
-                    max_price       = fc_args.get("max_price"),
+                    max_price       = max_price,
                     limit           = 3,
                 )
                 tool_result = _format_search_results(results)
