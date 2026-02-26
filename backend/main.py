@@ -3,7 +3,11 @@ import os
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import json
+import logging
+import time
 import uuid
+from datetime import datetime, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -14,6 +18,38 @@ from dotenv import load_dotenv
 from services.retrieval_service import get_all_coffees_minified
 
 load_dotenv()
+
+# ── Logging setup ─────────────────────────────────────────────────────────────
+
+class _JSONFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts":    datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "msg":   record.getMessage(),
+        }
+        if hasattr(record, "data"):
+            payload.update(record.data)
+        if record.exc_info:
+            payload["error"] = self.formatException(record.exc_info)
+        return json.dumps(payload)
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_JSONFormatter())
+
+log = logging.getLogger("what_coffee")
+log.addHandler(_handler)
+log.setLevel(logging.INFO)
+log.propagate = False
+
+
+def _log(level: str, msg: str, **data):
+    record = logging.LogRecord(
+        name="what_coffee", level=getattr(logging, level),
+        pathname="", lineno=0, msg=msg, args=(), exc_info=None,
+    )
+    record.data = data
+    log.handle(record)
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
@@ -42,6 +78,10 @@ def _load_system_prompt() -> str:
 SYSTEM_PROMPT = _load_system_prompt()
 COFFEE_DB     = get_all_coffees_minified()
 
+_log("INFO", "startup",
+     coffee_db_lines=COFFEE_DB.count("\n"),
+     system_prompt_chars=len(SYSTEM_PROMPT))
+
 # ── Request model ─────────────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
@@ -58,8 +98,17 @@ def root():
 @app.post("/chat")
 async def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
-    if session_id not in sessions:
+    is_new     = session_id not in sessions
+    if is_new:
         sessions[session_id] = []
+
+    turn = len(sessions[session_id]) // 2 + 1
+
+    _log("INFO", "chat_request",
+         session_id=session_id,
+         is_new_session=is_new,
+         turn=turn,
+         message_length=len(request.message))
 
     sessions[session_id].append({
         "role":    "user",
@@ -68,29 +117,51 @@ async def chat(request: ChatRequest):
 
     def stream_response():
         full_response = ""
-        with client.messages.stream(
-            model      = "claude-sonnet-4-6",
-            max_tokens = 1024,
-            system     = [
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        "COFFEE DATABASE "
-                        "(columns: roaster|name|roast|process|origin|flavors|brew_methods|price_inr|url):\n"
-                        + COFFEE_DB
-                    ),
-                    "cache_control": {"type": "ephemeral"},
-                },
-            ],
-            messages   = sessions[session_id],
-        ) as stream:
-            for text in stream.text_stream:
-                full_response += text
-                yield text
+        t0 = time.perf_counter()
+        try:
+            with client.messages.stream(
+                model      = "claude-sonnet-4-6",
+                max_tokens = 1024,
+                system     = [
+                    {
+                        "type": "text",
+                        "text": SYSTEM_PROMPT,
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "COFFEE DATABASE "
+                            "(columns: roaster|name|roast|process|origin|flavors|brew_methods|price_inr|url):\n"
+                            + COFFEE_DB
+                        ),
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+                messages   = sessions[session_id],
+            ) as stream:
+                for text in stream.text_stream:
+                    full_response += text
+                    yield text
+
+                usage = stream.get_final_message().usage
+
+            _log("INFO", "chat_response",
+                 session_id=session_id,
+                 turn=turn,
+                 duration_ms=round((time.perf_counter() - t0) * 1000),
+                 response_length=len(full_response),
+                 input_tokens=usage.input_tokens,
+                 output_tokens=usage.output_tokens,
+                 cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0),
+                 cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", 0))
+
+        except Exception as exc:
+            _log("ERROR", "chat_error",
+                 session_id=session_id,
+                 turn=turn,
+                 duration_ms=round((time.perf_counter() - t0) * 1000),
+                 error=str(exc))
+            raise
 
         sessions[session_id].append({
             "role":    "assistant",
@@ -108,4 +179,5 @@ async def chat(request: ChatRequest):
 def clear_session(session_id: str):
     if session_id in sessions:
         del sessions[session_id]
+        _log("INFO", "session_cleared", session_id=session_id)
     return {"status": "session cleared"}
