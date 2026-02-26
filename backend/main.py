@@ -12,7 +12,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from groq import Groq
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 from services.retrieval_service import search_coffees
@@ -63,50 +64,49 @@ app.add_middleware(
     expose_headers=["X-Session-Id"],
 )
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# In-memory session store — list of OpenAI-format messages per session
-# System prompt is prepended on each API call, not stored in session
+# In-memory session store — list of types.Content objects per session
 sessions: dict = {}
 
 MAX_TURNS = 8  # hard cap per session
 
 # ── Tool definition ───────────────────────────────────────────────────────────
 
-SEARCH_TOOL = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_coffees",
-            "description": (
+SEARCH_TOOL = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="search_coffees",
+            description=(
                 "Search the coffee database for coffees that match the user's preferences. "
                 "Call this as soon as you have the user's brew method AND flavor preferences. "
                 "Do not keep asking questions — call the tool and present the results."
             ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "brew_method": {
-                        "type": "string",
-                        "description": "Brewing equipment, e.g. Pour Over, Espresso, French Press, AeroPress, Moka Pot, South Indian Filter, Cold Brew",
-                    },
-                    "roast_level": {
-                        "type": "string",
-                        "description": "Preferred roast level: light, medium-light, medium, medium-dark, dark",
-                    },
-                    "flavor_keywords": {
-                        "type": "string",
-                        "description": "Flavor descriptors the user mentioned, comma-separated, e.g. fruity, citrus, chocolate, caramel, floral",
-                    },
-                    "max_price": {
-                        "type": "string",
-                        "description": "Maximum budget in INR per 250g, e.g. 500",
-                    },
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "brew_method": types.Schema(
+                        type=types.Type.STRING,
+                        description="Brewing equipment, e.g. Pour Over, Espresso, French Press, AeroPress, Moka Pot, South Indian Filter, Cold Brew",
+                    ),
+                    "roast_level": types.Schema(
+                        type=types.Type.STRING,
+                        description="Preferred roast level: light, medium-light, medium, medium-dark, dark",
+                    ),
+                    "flavor_keywords": types.Schema(
+                        type=types.Type.ARRAY,
+                        items=types.Schema(type=types.Type.STRING),
+                        description="Flavor descriptors the user mentioned, e.g. fruity, citrus, chocolate, caramel, floral",
+                    ),
+                    "max_price": types.Schema(
+                        type=types.Type.NUMBER,
+                        description="Maximum budget in INR per 250g",
+                    ),
                 },
-            },
-        },
-    }
-]
+            ),
+        )
+    ]
+)
 
 
 def _format_search_results(coffees: list[dict]) -> str:
@@ -131,6 +131,12 @@ def _load_system_prompt() -> str:
 
 SYSTEM_PROMPT = _load_system_prompt()
 
+_GEN_CONFIG = types.GenerateContentConfig(
+    system_instruction=SYSTEM_PROMPT,
+    tools=[SEARCH_TOOL],
+    max_output_tokens=600,
+)
+
 _log("INFO", "startup", system_prompt_chars=len(SYSTEM_PROMPT))
 
 # ── Request model ─────────────────────────────────────────────────────────────
@@ -141,14 +147,13 @@ class ChatRequest(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _is_real_user_turn(msg: dict) -> bool:
-    """True for user text messages, False for tool result messages."""
-    return msg.get("role") == "user" and isinstance(msg.get("content"), str)
-
-
-def _messages_with_system() -> list:
-    """Build message list with system prompt prepended — not stored in session."""
-    return [{"role": "system", "content": SYSTEM_PROMPT}]
+def _is_real_user_turn(content: types.Content) -> bool:
+    """True for user text messages, False for function_response messages."""
+    return (
+        content.role == "user" and
+        bool(content.parts) and
+        bool(content.parts[0].text)
+    )
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -181,48 +186,35 @@ async def chat(request: ChatRequest):
             headers    = {"X-Session-Id": session_id},
         )
 
-    sessions[session_id].append({"role": "user", "content": request.message})
+    sessions[session_id].append(
+        types.Content(role="user", parts=[types.Part(text=request.message)])
+    )
 
     def stream_response():
         full_text      = ""
         rec_text       = ""
-        finish_reason  = None
-        tool_call_id   = None
-        tool_call_name = None
-        tool_call_args = ""
+        function_call  = None
         t0             = time.perf_counter()
 
         try:
             # ── First call ────────────────────────────────────────────────────
-            stream = client.chat.completions.create(
-                model       = "llama-3.3-70b-versatile",
-                messages    = _messages_with_system() + sessions[session_id],
-                tools       = SEARCH_TOOL,
-                tool_choice = "auto",
-                max_tokens  = 600,
-                stream      = True,
-            )
-
-            for chunk in stream:
-                choice = chunk.choices[0]
-                if choice.finish_reason:
-                    finish_reason = choice.finish_reason
-                delta = choice.delta
-                if delta.content:
-                    full_text += delta.content
-                    yield delta.content
-                if delta.tool_calls:
-                    tc = delta.tool_calls[0]
-                    if tc.id:
-                        tool_call_id = tc.id
-                    if tc.function.name:
-                        tool_call_name = tc.function.name
-                    if tc.function.arguments:
-                        tool_call_args += tc.function.arguments
+            for chunk in client.models.generate_content_stream(
+                model    = "gemini-2.0-flash",
+                contents = sessions[session_id],
+                config   = _GEN_CONFIG,
+            ):
+                if not chunk.candidates:
+                    continue
+                for part in chunk.candidates[0].content.parts:
+                    if part.text:
+                        full_text += part.text
+                        yield part.text
+                    elif part.function_call:
+                        function_call = part.function_call
 
             # ── Tool call branch ──────────────────────────────────────────────
-            if finish_reason == "tool_calls" and tool_call_name:
-                fc_args = json.loads(tool_call_args)
+            if function_call:
+                fc_args = dict(function_call.args)
 
                 _log("INFO", "tool_call",
                      session_id=session_id,
@@ -231,71 +223,71 @@ async def chat(request: ChatRequest):
                      roast_level=fc_args.get("roast_level"),
                      flavor_keywords=fc_args.get("flavor_keywords"))
 
-                raw_flavors = fc_args.get("flavor_keywords") or ""
-                if isinstance(raw_flavors, list):
-                    flavor_keywords = raw_flavors
-                else:
-                    flavor_keywords = [k.strip() for k in raw_flavors.split(",") if k.strip()]
+                raw_flavors = fc_args.get("flavor_keywords") or []
+                flavor_keywords = list(raw_flavors) if isinstance(raw_flavors, list) else [k.strip() for k in str(raw_flavors).split(",") if k.strip()]
 
-                raw_price = fc_args.get("max_price")
-                try:
-                    max_price = float(raw_price) if raw_price else None
-                except (ValueError, TypeError):
-                    max_price = None
-
-                results     = search_coffees(
+                results = search_coffees(
                     brew_method     = fc_args.get("brew_method"),
                     roast_level     = fc_args.get("roast_level"),
                     flavor_keywords = flavor_keywords,
-                    max_price       = max_price,
+                    max_price       = fc_args.get("max_price"),
                     limit           = 3,
                 )
                 tool_result = _format_search_results(results)
 
-                # Store assistant tool call + tool result in history
-                sessions[session_id].append({
-                    "role":       "assistant",
-                    "content":    None,
-                    "tool_calls": [{
-                        "id":       tool_call_id,
-                        "type":     "function",
-                        "function": {
-                            "name":      tool_call_name,
-                            "arguments": tool_call_args,
-                        },
-                    }],
-                })
-                sessions[session_id].append({
-                    "role":         "tool",
-                    "tool_call_id": tool_call_id,
-                    "content":      tool_result,
-                })
+                # Store model's function call + tool result in history
+                sessions[session_id].append(
+                    types.Content(
+                        role="model",
+                        parts=[types.Part(
+                            function_call=types.FunctionCall(
+                                name=function_call.name,
+                                args=fc_args,
+                            )
+                        )],
+                    )
+                )
+                sessions[session_id].append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(
+                            function_response=types.FunctionResponse(
+                                name=function_call.name,
+                                response={"result": tool_result},
+                            )
+                        )],
+                    )
+                )
 
                 # ── Second call: stream the recommendation ────────────────────
-                stream2 = client.chat.completions.create(
-                    model      = "llama-3.3-70b-versatile",
-                    messages   = _messages_with_system() + sessions[session_id],
-                    max_tokens = 600,
-                    stream     = True,
-                )
-                for chunk in stream2:
-                    delta = chunk.choices[0].delta
-                    if delta.content:
-                        rec_text += delta.content
-                        yield delta.content
+                for chunk in client.models.generate_content_stream(
+                    model    = "gemini-2.0-flash",
+                    contents = sessions[session_id],
+                    config   = _GEN_CONFIG,
+                ):
+                    if not chunk.candidates:
+                        continue
+                    for part in chunk.candidates[0].content.parts:
+                        if part.text:
+                            rec_text += part.text
+                            yield part.text
 
-                sessions[session_id].append({"role": "assistant", "content": rec_text})
+                sessions[session_id].append(
+                    types.Content(role="model", parts=[types.Part(text=rec_text)])
+                )
 
             else:
                 # Plain conversational response
-                sessions[session_id].append({"role": "assistant", "content": full_text})
+                sessions[session_id].append(
+                    types.Content(role="model", parts=[types.Part(text=full_text)])
+                )
 
             _log("INFO", "chat_response",
                  session_id=session_id,
                  turn=turn,
                  duration_ms=round((time.perf_counter() - t0) * 1000),
-                 response_length=len(rec_text if finish_reason == "tool_calls" else full_text),
-                 used_tool=(finish_reason == "tool_calls"))
+                 response_length=len(rec_text if function_call else full_text),
+                 used_tool=(function_call is not None))
 
         except Exception as exc:
             _log("ERROR", "chat_error",
@@ -304,16 +296,7 @@ async def chat(request: ChatRequest):
                  duration_ms=round((time.perf_counter() - t0) * 1000),
                  error=str(exc))
             err = str(exc)
-            is_tool_error = (
-                "Failed to call a function" in err or
-                "not in request.tools" in err or
-                "tool call validation failed" in err
-            )
-            if is_tool_error:
-                msg = "I got a bit confused there! Could you tell me again what brew method you use and what flavors you enjoy?"
-                yield msg
-                sessions[session_id].append({"role": "assistant", "content": msg})
-            elif "429" in err or "rate" in err.lower() or "quota" in err.lower():
+            if "429" in err or "quota" in err.lower() or "ResourceExhausted" in type(exc).__name__:
                 yield "I'm getting a lot of requests right now — please try again in a minute!"
             else:
                 yield "Something went wrong on my end. Please try again!"
