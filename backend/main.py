@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-import anthropic
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 from services.retrieval_service import search_coffees
@@ -63,47 +63,49 @@ app.add_middleware(
     expose_headers=["X-Session-Id"],
 )
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=3)
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # In-memory session store
+# Messages stored in Gemini format: {"role": "user"/"model", "parts": [{"text": ...}]}
 sessions: dict = {}
 
 MAX_TURNS = 8  # hard cap per session — no API call beyond this
 
 # ── Tool definition ───────────────────────────────────────────────────────────
+# Gemini uses uppercase type names (STRING, OBJECT, ARRAY, NUMBER)
 
-SEARCH_TOOL = {
-    "name": "search_coffees",
-    "description": (
-        "Search the coffee database for coffees that match the user's preferences. "
-        "Call this as soon as you have the user's brew method AND flavor preferences. "
-        "Do not keep asking questions — call the tool and present the results."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "brew_method": {
-                "type": "string",
-                "description": "Brewing equipment, e.g. 'Pour Over', 'Espresso', 'French Press', 'AeroPress', 'Moka Pot', 'South Indian Filter', 'Cold Brew'",
-            },
-            "roast_level": {
-                "type": "string",
-                "enum": ["light", "medium-light", "medium", "medium-dark", "dark"],
-                "description": "Preferred roast level",
-            },
-            "flavor_keywords": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Flavor descriptors the user mentioned, e.g. ['fruity', 'citrus', 'chocolate', 'caramel', 'floral']",
-            },
-            "max_price": {
-                "type": "number",
-                "description": "Maximum budget in INR per 250g",
+SEARCH_TOOL = [{
+    "function_declarations": [{
+        "name": "search_coffees",
+        "description": (
+            "Search the coffee database for coffees that match the user's preferences. "
+            "Call this as soon as you have the user's brew method AND flavor preferences. "
+            "Do not keep asking questions — call the tool and present the results."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "brew_method": {
+                    "type": "STRING",
+                    "description": "Brewing equipment, e.g. Pour Over, Espresso, French Press, AeroPress, Moka Pot, South Indian Filter, Cold Brew",
+                },
+                "roast_level": {
+                    "type": "STRING",
+                    "description": "Preferred roast level: light, medium-light, medium, medium-dark, dark",
+                },
+                "flavor_keywords": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                    "description": "Flavor descriptors the user mentioned, e.g. fruity, citrus, chocolate, caramel, floral",
+                },
+                "max_price": {
+                    "type": "NUMBER",
+                    "description": "Maximum budget in INR per 250g",
+                },
             },
         },
-        "required": [],
-    },
-}
+    }],
+}]
 
 
 def _format_search_results(coffees: list[dict]) -> str:
@@ -128,6 +130,12 @@ def _load_system_prompt() -> str:
 
 SYSTEM_PROMPT = _load_system_prompt()
 
+# Gemini model — system_instruction is set once here
+model = genai.GenerativeModel(
+    model_name   = "gemini-2.0-flash",
+    system_instruction = SYSTEM_PROMPT,
+)
+
 _log("INFO", "startup", system_prompt_chars=len(SYSTEM_PROMPT))
 
 # ── Request model ─────────────────────────────────────────────────────────────
@@ -135,6 +143,18 @@ _log("INFO", "startup", system_prompt_chars=len(SYSTEM_PROMPT))
 class ChatRequest(BaseModel):
     message:    str = Field(..., max_length=500)
     session_id: str | None = None
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _is_real_user_turn(msg: dict) -> bool:
+    """True for user text messages, False for function_response messages."""
+    parts = msg.get("parts", [])
+    return (
+        msg.get("role") == "user" and
+        parts and
+        isinstance(parts[0], dict) and
+        "text" in parts[0]
+    )
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -150,11 +170,7 @@ async def chat(request: ChatRequest):
     if is_new:
         sessions[session_id] = []
 
-    # Count only real user turns (not tool_result messages)
-    turn = sum(
-        1 for m in sessions[session_id]
-        if m["role"] == "user" and isinstance(m.get("content"), str)
-    ) + 1
+    turn = sum(1 for m in sessions[session_id] if _is_real_user_turn(m)) + 1
 
     _log("INFO", "chat_request",
          session_id=session_id,
@@ -162,7 +178,6 @@ async def chat(request: ChatRequest):
          turn=turn,
          message_length=len(request.message))
 
-    # Hard turn cap — return canned message without calling Claude
     if turn > MAX_TURNS:
         _log("INFO", "turn_limit_reached", session_id=session_id)
         canned = "You've reached the end of this session! Refresh the page to start fresh and discover more coffees."
@@ -172,91 +187,103 @@ async def chat(request: ChatRequest):
             headers    = {"X-Session-Id": session_id},
         )
 
+    # Gemini message format: role + parts list
     sessions[session_id].append({
-        "role":    "user",
-        "content": request.message,
+        "role":  "user",
+        "parts": [{"text": request.message}],
     })
 
     def stream_response():
-        full_response = ""
-        t0 = time.perf_counter()
-        usage = None
-        try:
-            # ── First call: conversation or tool invocation ───────────────────
-            with client.messages.stream(
-                model      = "claude-haiku-4-5-20251001",
-                max_tokens = 600,
-                system     = SYSTEM_PROMPT,
-                tools      = [SEARCH_TOOL],
-                messages   = sessions[session_id],
-            ) as stream:
-                for text in stream.text_stream:
-                    full_response += text
-                    yield text
-                first_msg = stream.get_final_message()
-                usage = first_msg.usage
+        full_text      = ""
+        rec_text       = ""
+        function_call  = None
+        t0             = time.perf_counter()
 
-            # ── If Claude called the search tool ─────────────────────────────
-            if first_msg.stop_reason == "tool_use":
-                tool_block = next(b for b in first_msg.content if b.type == "tool_use")
-                tool_input = tool_block.input
+        try:
+            # ── First call ────────────────────────────────────────────────────
+            response = model.generate_content(
+                contents          = sessions[session_id],
+                tools             = SEARCH_TOOL,
+                generation_config = {"max_output_tokens": 600},
+                stream            = True,
+            )
+
+            for chunk in response:
+                if not chunk.candidates:
+                    continue
+                for part in chunk.candidates[0].content.parts:
+                    if hasattr(part, "text") and part.text:
+                        full_text += part.text
+                        yield part.text
+                    elif hasattr(part, "function_call") and part.function_call.name:
+                        function_call = part.function_call
+
+            # ── Tool call branch ──────────────────────────────────────────────
+            if function_call:
+                fc_args = dict(function_call.args)
 
                 _log("INFO", "tool_call",
                      session_id=session_id,
                      turn=turn,
-                     brew_method=tool_input.get("brew_method"),
-                     roast_level=tool_input.get("roast_level"),
-                     flavor_keywords=tool_input.get("flavor_keywords"))
+                     brew_method=fc_args.get("brew_method"),
+                     roast_level=fc_args.get("roast_level"),
+                     flavor_keywords=fc_args.get("flavor_keywords"))
 
-                results = search_coffees(
-                    brew_method     = tool_input.get("brew_method"),
-                    roast_level     = tool_input.get("roast_level"),
-                    flavor_keywords = tool_input.get("flavor_keywords"),
-                    max_price       = tool_input.get("max_price"),
+                results     = search_coffees(
+                    brew_method     = fc_args.get("brew_method"),
+                    roast_level     = fc_args.get("roast_level"),
+                    flavor_keywords = list(fc_args.get("flavor_keywords") or []),
+                    max_price       = fc_args.get("max_price"),
                     limit           = 3,
                 )
                 tool_result = _format_search_results(results)
 
-                followup_messages = sessions[session_id] + [
-                    {"role": "assistant", "content": first_msg.content},
-                    {"role": "user", "content": [
-                        {"type": "tool_result", "tool_use_id": tool_block.id, "content": tool_result}
-                    ]},
-                ]
+                # Store model's function call + tool result in history
+                sessions[session_id].append({
+                    "role":  "model",
+                    "parts": [{"function_call": {"name": function_call.name, "args": fc_args}}],
+                })
+                sessions[session_id].append({
+                    "role":  "user",
+                    "parts": [{"function_response": {
+                        "name":     function_call.name,
+                        "response": {"result": tool_result},
+                    }}],
+                })
 
-                # ── Second call: Claude writes recommendation from results ────
-                rec_response = ""
-                with client.messages.stream(
-                    model      = "claude-haiku-4-5-20251001",
-                    max_tokens = 600,
-                    system     = SYSTEM_PROMPT,
-                    tools      = [SEARCH_TOOL],
-                    messages   = followup_messages,
-                ) as stream2:
-                    for text in stream2.text_stream:
-                        rec_response += text
-                        yield text
-                    usage = stream2.get_final_message().usage
+                # ── Second call: stream the recommendation ────────────────────
+                response2 = model.generate_content(
+                    contents          = sessions[session_id],
+                    tools             = SEARCH_TOOL,
+                    generation_config = {"max_output_tokens": 600},
+                    stream            = True,
+                )
+                for chunk in response2:
+                    if not chunk.candidates:
+                        continue
+                    for part in chunk.candidates[0].content.parts:
+                        if hasattr(part, "text") and part.text:
+                            rec_text += part.text
+                            yield part.text
 
-                # Store full tool exchange in session history
-                sessions[session_id].append({"role": "assistant", "content": first_msg.content})
-                sessions[session_id].append({"role": "user", "content": [
-                    {"type": "tool_result", "tool_use_id": tool_block.id, "content": tool_result}
-                ]})
-                sessions[session_id].append({"role": "assistant", "content": rec_response})
+                sessions[session_id].append({
+                    "role":  "model",
+                    "parts": [{"text": rec_text}],
+                })
 
             else:
                 # Plain conversational response
-                sessions[session_id].append({"role": "assistant", "content": full_response})
+                sessions[session_id].append({
+                    "role":  "model",
+                    "parts": [{"text": full_text}],
+                })
 
             _log("INFO", "chat_response",
                  session_id=session_id,
                  turn=turn,
                  duration_ms=round((time.perf_counter() - t0) * 1000),
-                 response_length=len(full_response),
-                 input_tokens=usage.input_tokens if usage else 0,
-                 output_tokens=usage.output_tokens if usage else 0,
-                 used_tool=(first_msg.stop_reason == "tool_use"))
+                 response_length=len(rec_text if function_call else full_text),
+                 used_tool=(function_call is not None))
 
         except Exception as exc:
             _log("ERROR", "chat_error",
