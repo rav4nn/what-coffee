@@ -7,7 +7,7 @@ import uuid
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import anthropic
 from dotenv import load_dotenv
 
@@ -45,7 +45,7 @@ COFFEE_DB     = get_all_coffees_minified()
 # ── Request model ─────────────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
-    message:    str
+    message:    str = Field(..., max_length=500)
     session_id: str | None = None
 
 # ── Routes ────────────────────────────────────────────────────────────────────
