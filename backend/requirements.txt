@@ -3,7 +3,7 @@ fastapi
 uvicorn[standard]
 
 # LLM
-google-genai
+openai
 
 # Database
 peewee
