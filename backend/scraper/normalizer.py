@@ -124,6 +124,38 @@ def normalize_weight(weight_str: str) -> str:
     return weight_str  # return original if we can't parse it
 
 
+def parse_grams(weight_str: str) -> float | None:
+    """Parse a normalized weight string (e.g., '250g', '1kg') into grams."""
+    w = weight_str.lower().strip()
+    kg = re.match(r"^(\d+(?:\.\d+)?)kg$", w)
+    if kg:
+        return float(kg.group(1)) * 1000
+    g = re.match(r"^(\d+(?:\.\d+)?)g$", w)
+    if g:
+        return float(g.group(1))
+    return None
+
+
+def price_per_250g(clean_variants: list) -> float:
+    """
+    Return the lowest price-per-250g across all weight variants.
+    Falls back to the raw minimum price if no weights can be parsed.
+    """
+    best = None
+    for v in clean_variants:
+        grams = parse_grams(v.get("weight", ""))
+        price = v.get("price", 0)
+        if grams and grams > 0 and price > 0:
+            per_250 = price / grams * 250
+            if best is None or per_250 < best:
+                best = per_250
+    if best is not None:
+        return round(best)
+    # fallback: no weight info — use cheapest raw variant price
+    prices = [v["price"] for v in clean_variants if v.get("price", 0) > 0]
+    return min(prices) if prices else 0
+
+
 def extract_weight_variants(variants: list) -> list:
     """Deduplicate and normalize weight variants, keeping unique weights only."""
     seen_weights = set()
@@ -301,8 +333,8 @@ def normalize(product: dict) -> dict:
         "acidity":        acidity,
         "body":           body,
 
-        # pricing
-        "price_min":      product.get("price_min", 0),
+        # pricing — normalised to per-250g so bags of different sizes compare fairly
+        "price_min":      price_per_250g(clean_variants) or product.get("price_min", 0),
         "price_variants": clean_variants,
         "is_available":   is_available,
 

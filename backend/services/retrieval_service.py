@@ -4,12 +4,41 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.coffee import Coffee, init_db
 from peewee import fn
 
+
+def get_all_coffees_minified() -> str:
+    """
+    Load all available coffees and return as a pipe-delimited string for
+    injection into the Claude system prompt as a cached block.
+    Format: roaster|name|roast|process|origin|flavors|brew_methods|price_inr|url
+    """
+    init_db()
+    coffees = list(
+        Coffee.select()
+        .where(Coffee.is_available == True)
+        .order_by(Coffee.roaster, Coffee.name)
+    )
+    lines = ["roaster|name|roast|process|origin|flavors|brew_methods|price_inr|url"]
+    for c in coffees:
+        lines.append("|".join([
+            (c.roaster      or "").replace("|", "/"),
+            (c.name         or "").replace("|", "/"),
+            c.roast_level   or "",
+            c.process       or "",
+            c.origin        or "",
+            (c.flavor_notes or "").replace("|", "/"),
+            (c.brew_methods or "").replace("|", "/"),
+            str(int(c.price_min)) if c.price_min else "0",
+            c.source_url    or "",
+        ]))
+    return "\n".join(lines)
+
 def search_coffees(
     roast_level: str = None,
     brew_method: str = None,
     flavor_keywords: list = None,
     process: str = None,
     max_price: float = None,
+    roaster: str = None,
     limit: int = 5
 ) -> list[dict]:
     """
@@ -24,9 +53,13 @@ def search_coffees(
         flavor_keywords,
         process and process != "unknown",
         max_price,
+        roaster,
     ])
 
     query = Coffee.select().where(Coffee.is_available == True)
+
+    if roaster:
+        query = query.where(Coffee.roaster == roaster)
 
     if roast_level and roast_level != "unknown":
         query = query.where(Coffee.roast_level == roast_level)

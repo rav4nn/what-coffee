@@ -20,10 +20,11 @@ STORES = [
     {"name": "Araku",               "url": "https://arakucoffee.in"},
     {"name": "Kapi Kottai",         "url": "https://kapikottai.coffee"},
     {"name": "KC Roasters",         "url": "https://kcroasters.com"},
-    {"name": "Savour Works",        "url": "https://savourworksroasters.com"},
+    {"name": "Savour Works",        "url": "https://savorworksroasters.com"},
     {"name": "Tulum",               "url": "https://tulum.coffee"},
-    {"name": "Ground Zero",         "url": "https://groundzerocoffee.in"},
     {"name": "Hunkal Estate",       "url": "https://hunkalestatecoffee.com"},
+    {"name": "Devans",              "url": "https://devans.in"},
+    {"name": "Ambrosia",            "url": "https://ambrosiaroasters.com"},
 ]
 
 # ── Keywords to filter only coffee products (excludes equipment, merch etc) ──
