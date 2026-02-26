@@ -56,7 +56,10 @@ def search_coffees(
         roaster,
     ])
 
-    query = Coffee.select().where(Coffee.is_available == True)
+    query = (Coffee.select()
+             .where(Coffee.is_available == True)
+             .where(Coffee.flavor_notes.is_null(False))
+             .where(Coffee.flavor_notes != ""))
 
     if roaster:
         query = query.where(Coffee.roaster == roaster)
@@ -88,6 +91,8 @@ def search_coffees(
         results = list(
             Coffee.select()
             .where(Coffee.is_available == True)
+            .where(Coffee.flavor_notes.is_null(False))
+            .where(Coffee.flavor_notes != "")
             .order_by(fn.RANDOM())
             .limit(limit)
         )
