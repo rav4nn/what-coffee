@@ -95,9 +95,8 @@ SEARCH_TOOL = [
                         "description": "Preferred roast level: light, medium-light, medium, medium-dark, dark",
                     },
                     "flavor_keywords": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Flavor descriptors the user mentioned, e.g. fruity, citrus, chocolate, caramel, floral",
+                        "type": "string",
+                        "description": "Flavor descriptors the user mentioned, comma-separated, e.g. fruity, citrus, chocolate, caramel, floral",
                     },
                     "max_price": {
                         "type": "number",
@@ -232,10 +231,16 @@ async def chat(request: ChatRequest):
                      roast_level=fc_args.get("roast_level"),
                      flavor_keywords=fc_args.get("flavor_keywords"))
 
+                raw_flavors = fc_args.get("flavor_keywords") or ""
+                if isinstance(raw_flavors, list):
+                    flavor_keywords = raw_flavors
+                else:
+                    flavor_keywords = [k.strip() for k in raw_flavors.split(",") if k.strip()]
+
                 results     = search_coffees(
                     brew_method     = fc_args.get("brew_method"),
                     roast_level     = fc_args.get("roast_level"),
-                    flavor_keywords = list(fc_args.get("flavor_keywords") or []),
+                    flavor_keywords = flavor_keywords,
                     max_price       = fc_args.get("max_price"),
                     limit           = 3,
                 )
