@@ -304,7 +304,16 @@ async def chat(request: ChatRequest):
                  duration_ms=round((time.perf_counter() - t0) * 1000),
                  error=str(exc))
             err = str(exc)
-            if "429" in err or "rate" in err.lower() or "quota" in err.lower():
+            is_tool_error = (
+                "Failed to call a function" in err or
+                "not in request.tools" in err or
+                "tool call validation failed" in err
+            )
+            if is_tool_error:
+                msg = "I got a bit confused there! Could you tell me again what brew method you use and what flavors you enjoy?"
+                yield msg
+                sessions[session_id].append({"role": "assistant", "content": msg})
+            elif "429" in err or "rate" in err.lower() or "quota" in err.lower():
                 yield "I'm getting a lot of requests right now — please try again in a minute!"
             else:
                 yield "Something went wrong on my end. Please try again!"
